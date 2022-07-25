@@ -1,0 +1,263 @@
+diff --git a/healthd/Android.mk b/healthd/Android.mk
+old mode 100644
+new mode 100755
+index 6b14289..f4dbfd6
+--- a/healthd/Android.mk
++++ b/healthd/Android.mk
+@@ -70,12 +70,15 @@ LOCAL_SRC_FILES := \
+     AnimationParser.cpp
+ 
+ LOCAL_MODULE := libhealthd_charger
+-LOCAL_C_INCLUDES := bootable/recovery $(LOCAL_PATH)/include
++LOCAL_C_INCLUDES := \
++	bootable/recovery $(LOCAL_PATH)/include \
++
+ LOCAL_EXPORT_C_INCLUDE_DIRS := \
+     $(LOCAL_PATH) \
+     $(LOCAL_PATH)/include
+ 
+ LOCAL_STATIC_LIBRARIES := \
++	libbootloader_message \
+     libminui \
+     libpng \
+     libz \
+@@ -87,6 +90,7 @@ LOCAL_STATIC_LIBRARIES := \
+     libm \
+     libc \
+ 
++
+ ifeq ($(strip $(BOARD_CHARGER_ENABLE_SUSPEND)),true)
+ LOCAL_STATIC_LIBRARIES += libsuspend
+ endif
+@@ -134,6 +138,9 @@ LOCAL_STATIC_LIBRARIES := \
+     liblog \
+     libm \
+     libc \
++	libbootloader_message \
++	libfs_mgr \
++	libbase \
+ 
+ ifneq ($(strip $(LOCAL_CHARGER_NO_UI)),true)
+ LOCAL_STATIC_LIBRARIES += \
+diff --git a/healthd/healthd_mode_charger.cpp b/healthd/healthd_mode_charger.cpp
+index 26c2c09..a4dbfe4 100755
+--- a/healthd/healthd_mode_charger.cpp
++++ b/healthd/healthd_mode_charger.cpp
+@@ -35,6 +35,8 @@
+ 
+ #include <android-base/file.h>
+ #include <android-base/macros.h>
++/*dongxc add for bootloader meassage read*/
++#include <bootloader_message/bootloader_message.h>
+ 
+ #include <linux/netlink.h>
+ #include <sys/socket.h>
+@@ -423,6 +425,11 @@ static void set_next_key_check(charger* charger, key_state* key, int64_t timeout
+ static void process_key(charger* charger, int code, int64_t now) {
+     key_state* key = &charger->keys[code];
+ 
++    /*donxc add for read misc*/
++    bootloader_message boot = {};
++    bootloader_message boot2 = {};
++    std::string err;
++
+     if (code == KEY_POWER) {
+         if (key->down) {
+             int64_t reboot_timeout = key->timestamp + POWER_ON_KEY_TIME;
+@@ -435,8 +442,17 @@ static void process_key(charger* charger, int code, int64_t now) {
+                     property_set("sys.boot_from_charger_mode", "1");
+                 } else {
+                     if (charger->batt_anim->cur_level >= charger->boot_min_cap) {
+-                        LOGW("[%" PRId64 "] rebooting\n", now);
+-                        reboot(RB_AUTOBOOT);
++                        LOGW("[%" PRId64 "][DD] rebooting - shutdown begin(1811)\n", now);
++                        strlcpy(boot.command,"nopause",sizeof(boot.command));
++                        write_bootloader_message_misc(BTLDMSG_OFFSET_IN_MISC_BOOTREASON,&boot,&err);
++                        LOGW("[DD] write boot misc %s\n", boot.command);
++                        sleep(1);
++                        read_bootloader_message_misc(BTLDMSG_OFFSET_IN_MISC_BOOTREASON,&boot2,&err);
++                        LOGW("[DD] read boot misc %s\n", boot2.command);
++                        sleep(5);
++                        LOGW("[%" PRId64 "][DD] rebooting - shutdown end\n", now);
++                        //reboot(RB_AUTOBOOT);
++                        reboot(RB_POWER_OFF);
+                     } else {
+                         LOGV("[%" PRId64
+                              "] ignore power-button press, battery level "
+diff --git a/prebuilts/api/26.0/public/healthd.te b/prebuilts/api/26.0/public/healthd.te
+old mode 100644
+new mode 100755
+index c0a7bec..a1d1ef9
+--- a/prebuilts/api/26.0/public/healthd.te
++++ b/prebuilts/api/26.0/public/healthd.te
+@@ -55,6 +55,8 @@ allow healthd tty_device:chr_file rw_file_perms;
+ allow healthd ashmem_device:chr_file execute;
+ allow healthd self:process execmem;
+ allow healthd proc_sysrq:file rw_file_perms;
++allow healthd block_device:dir {open read search write};
++allow healthd misc_block_device:blk_file {open read write getattr};
+ 
+ add_service(healthd, batteryproperties_service)
+ 
+diff --git a/public/healthd.te b/public/healthd.te
+old mode 100644
+new mode 100755
+index c0a7bec..a1d1ef9
+--- a/public/healthd.te
++++ b/public/healthd.te
+@@ -55,6 +55,8 @@ allow healthd tty_device:chr_file rw_file_perms;
+ allow healthd ashmem_device:chr_file execute;
+ allow healthd self:process execmem;
+ allow healthd proc_sysrq:file rw_file_perms;
++allow healthd block_device:dir {open read search write};
++allow healthd misc_block_device:blk_file {open read write getattr};
+ 
+ add_service(healthd, batteryproperties_service)
+ 
+diff --git a/bootloader_message/bootloader_message.cpp b/bootloader_message/bootloader_message.cpp
+old mode 100644
+new mode 100755
+index f91446b..55271f1
+--- a/bootloader_message/bootloader_message.cpp
++++ b/bootloader_message/bootloader_message.cpp
+@@ -152,6 +152,23 @@ bool write_bootloader_message(const bootloader_message& boot, std::string* err)
+   return write_bootloader_message_to(boot, misc_blk_device, err);
+ }
+ 
++/*dongxc add for read boot message of sdcard-update,offset is 2048*/
++bool write_bootloader_message_misc(size_t offset,bootloader_message* boot, std::string* err) {
++  std::string misc_blk_device = get_misc_blk_device(err);
++  if (misc_blk_device.empty()) {
++    return false;
++  }
++  return write_misc_partition(boot, sizeof(*boot), misc_blk_device, offset, err);
++}
++
++bool read_bootloader_message_misc(size_t offset,bootloader_message* boot, std::string* err) {
++  std::string misc_blk_device = get_misc_blk_device(err);
++  if (misc_blk_device.empty()) {
++    return false;
++  }
++  return read_misc_partition(boot, sizeof(*boot), misc_blk_device, offset, err);
++}
++
+ bool clear_bootloader_message(std::string* err) {
+   bootloader_message boot = {};
+   return write_bootloader_message(boot, err);
+diff --git a/bootloader_message/include/bootloader_message/bootloader_message.h b/bootloader_message/include/bootloader_message/bootloader_message.h
+old mode 100644
+new mode 100755
+index 2ffbfc9..2884abf
+--- a/bootloader_message/include/bootloader_message/bootloader_message.h
++++ b/bootloader_message/include/bootloader_message/bootloader_message.h
+@@ -30,6 +30,10 @@
+ // are not configurable without changing all of them.
+ static const size_t BOOTLOADER_MESSAGE_OFFSET_IN_MISC = 0;
+ static const size_t WIPE_PACKAGE_OFFSET_IN_MISC = 16 * 1024;
++/*dongxc add for read bootreason in misc*/
++static const size_t BTLDMSG_OFFSET_IN_MISC_BOOTREASON = 2 * 1024;
++static const size_t BOOTREASON_IN_MISC = 4 * 1024;
++
+ 
+ /* Bootloader Message (2-KiB)
+  *
+@@ -194,6 +198,9 @@ bool read_bootloader_message_from(bootloader_message* boot, const std::string& m
+ 
+ // Write bootloader message to BCB.
+ bool write_bootloader_message(const bootloader_message& boot, std::string* err);
++// Read bootloader message from misc
++bool read_bootloader_message_misc(size_t offset,bootloader_message* boot, std::string* err);
++bool write_bootloader_message_misc(size_t offset,bootloader_message* boot, std::string* err);
+ 
+ // Write bootloader message to the specified BCB device.
+ bool write_bootloader_message_to(const bootloader_message& boot,
+diff --git a/app/aboot/aboot.c b/app/aboot/aboot.c
+old mode 100644
+new mode 100755
+index d583d92..45654a0
+--- a/app/aboot/aboot.c
++++ b/app/aboot/aboot.c
+@@ -170,6 +170,12 @@ struct fastboot_cmd_desc {
+ //String used to determine if the boot image has
+ //a uncompressed kernel + appended dtb
+ #define PATCHED_KERNEL_MAGIC "UNCOMPRESSED_IMG"
++//dongxc add misc boot info
++#define MISC_PAUSE_OFFSET_W 4   /*offset = page_offset * block(512)*/
++#define MISC_PAUSE_OFFSET_R 1   /*offset = page_offset * page(2048)*/
++#define NOPAUSE "nopause"
++#define PCLEAR "none"
++static bool chg_pause_en = true;
+ 
+ #if USE_BOOTDEV_CMDLINE
+ static const char *emmc_cmdline = " androidboot.bootdevice=";
+@@ -499,7 +505,7 @@ unsigned char *update_cmdline(const char * cmdline)
+ 	} else if (boot_reason_alarm) {
+ 		cmdline_len += strlen(alarmboot_cmdline);
+ 	} else if ((target_build_variant_user() || device.charger_screen_enabled)
+-			&& target_pause_for_battery_charge()) {
++			&& target_pause_for_battery_charge() && chg_pause_en) {
+ 		pause_at_bootup = 1;
+ 		cmdline_len += strlen(battchg_pause);
+ 	}
+@@ -4842,6 +4848,7 @@ void aboot_init(const struct app_descriptor *app)
+ 	unsigned reboot_mode = 0;
+ 	int boot_err_type = 0;
+ 	int boot_slot = INVALID;
++	char boot_msg[1024];
+ 
+ 	/* Initialise wdog to catch early lk crashes */
+ #if WDOG_SUPPORT
+@@ -4946,6 +4953,18 @@ void aboot_init(const struct app_descriptor *app)
+ 			(keys_get_state(KEY_HOME) || keys_get_state(KEY_VOLUMEDOWN)))
+ 			boot_into_fastboot = true;
+ 	}
++    /*dongxc add misc boot info begin*/
++    boot_read_misc(MISC_PAUSE_OFFSET_R,boot_msg);
++    dprintf(INFO,"[DD] boot_msg %s\n",boot_msg);
++    if(!strncmp(NOPAUSE,boot_msg,strlen(boot_msg))){
++        chg_pause_en = false;
++        /*clear misc partition*/
++        struct recovery_message bmsg;
++        memset(&bmsg, 0, sizeof(bmsg));
++		snprintf(bmsg.command, sizeof(bmsg.recovery), PCLEAR);
++        write_misc(MISC_PAUSE_OFFSET_W, &bmsg, sizeof(bmsg));
++    }
++    /*dongxc add misc boot info end*/
+ 	#if NO_KEYPAD_DRIVER
+ 	if (fastboot_trigger())
+ 		boot_into_fastboot = true;
+diff --git a/app/aboot/recovery.c b/app/aboot/recovery.c
+old mode 100644
+new mode 100755
+index 0cc2ceb..1a9bc285
+--- a/app/aboot/recovery.c
++++ b/app/aboot/recovery.c
+@@ -632,4 +632,13 @@ cleanup:
+ 	return retval;
+ }
+ 
++void boot_read_misc(unsigned page_offset,char *msg)
++{
++    char msg2[1024];
++
++    read_misc(page_offset,msg2,sizeof(msg2));
++	strlcpy(msg, msg2, strlen(msg2)+1);
++    dprintf(CRITICAL,"boot_read_misc:%d ,msg:%s ,msg2:%s ,len:%d\n",page_offset,msg,msg2,strlen(msg2));
++
++}
+ 
+diff --git a/app/aboot/recovery.h b/app/aboot/recovery.h
+old mode 100644
+new mode 100755
+index 177148a..1664d60
+--- a/app/aboot/recovery.h
++++ b/app/aboot/recovery.h
+@@ -80,6 +80,8 @@ int get_recovery_message(struct recovery_message *out);
+ int set_recovery_message(const struct recovery_message *in);
+ 
+ int recovery_init (void);
++void boot_read_misc(unsigned page_offset,char *msg);
++
+ /* This function will look for the ffbm cookie in the misc partition.
+  * Upon finding a valid cookie it will return 1 and place the cookie
+  * into ffbm.If it does not find a valid cookie it will return 0.If
