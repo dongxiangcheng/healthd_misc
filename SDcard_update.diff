@@ -1,0 +1,174 @@
+commit 60ff5325b0867b3efe0b86412dbd5b1dc0ed0552
+Author: dongxiangcheng <dong.xiangcheng@bluebank.com.cn>
+Date:   Wed Sep 11 10:05:37 2019 +0800
+
+    [Core-X4]Modify for recovery auto update from sdcard
+    
+    Change-Id: I42db90eff31f9993232991235f029189bc344f52
+
+diff --git a/LA.UM.7.6.2/LINUX/android/bootable/recovery/recovery.cpp b/LA.UM.7.6.2/LINUX/android/bootable/recovery/recovery.cpp
+index dd15ac2..55507be 100755
+--- a/LA.UM.7.6.2/LINUX/android/bootable/recovery/recovery.cpp
++++ b/LA.UM.7.6.2/LINUX/android/bootable/recovery/recovery.cpp
+@@ -120,6 +120,7 @@ static const char *TEMPORARY_LOG_FILE = "/tmp/recovery.log";
+ static const char *TEMPORARY_INSTALL_FILE = "/tmp/last_install";
+ static const char *LAST_KMSG_FILE = "/cache/recovery/last_kmsg";
+ static const char *LAST_LOG_FILE = "/cache/recovery/last_log";
++static const char *FULL_UPDATE_PKG = "/sdcard/update.zip";
+ // We will try to apply the update package 5 times at most in case of an I/O error or
+ // bspatch | imgpatch error.
+ static const int RETRY_LIMIT = 4;
+@@ -1082,6 +1083,29 @@ error:
+     return -1;
+ }
+ 
++static bool check_updatepkg_from_sdcard()
++{
++    int stat_err = 0;
++    struct stat fileAtt;
++
++    if (is_ufs_dev()) {
++            if (do_sdcard_mount_for_ufs() != 0) {
++                    ui->Print("\nFailed to mount sdcard\n");
++                    //return INSTALL_ERROR;
++            }
++            ui->Print("do_sdcard_mount_for_ufs ..\n");
++    } else  {
++             if (ensure_path_mounted(SDCARD_ROOT) != 0) {
++                 ui->Print("\n-- Couldn't mount %s.\n", SDCARD_ROOT);
++              //return INSTALL_ERROR;
++             }
++            ui->Print("ensure_path_mounted ..\n");
++    }
++
++    stat_err = stat(FULL_UPDATE_PKG, &fileAtt);
++
++    return stat_err;
++}
+ // How long (in seconds) we wait for the fuse-provided package file to
+ // appear, before timing out.
+ #define SDCARD_INSTALL_TIMEOUT 10
+@@ -1498,6 +1522,7 @@ int main(int argc, char **argv) {
+   bool security_update = false;
+   int status = INSTALL_SUCCESS;
+   bool mount_required = true;
++  int err_in;
+ 
+   if (has_cache && ensure_path_mounted(CACHE_ROOT) == 0) {
+   //Create /cache/recovery specifically if it is not created
+@@ -1667,6 +1692,20 @@ int main(int argc, char **argv) {
+   printf("\n");
+ 
+   ui->Print("Supported API: %d\n", kRecoveryApiVersion);
++  /*add for sdcard auto update*/
++  if(!check_updatepkg_from_sdcard()){
++      //ui->Print("check_updatepkg_from_sdcard 0 \n");
++        err_in = install_package(FULL_UPDATE_PKG, &should_wipe_cache,
++                                 TEMPORARY_INSTALL_FILE, true, 0/*retry_count*/);
++       ui->Print("install_package %d \n",err_in);
++       if (!err_in){
++          finish_recovery();
++          reboot("reboot,");
++       }
++      //apply_from_sdcard(device, &should_wipe_cache)
++  }else{
++      ui->Print("check_updatepkg_from_sdcard error \n");
++  }
+ 
+   if (update_package != nullptr) {
+     // It's not entirely true that we will modify the flash. But we want
+commit 7c6a93f2d5e6f7b599970d844e7c72f5d734d09c
+Author: dongxiangcheng <dong.xiangcheng@bluebank.com.cn>
+Date:   Wed Sep 25 14:21:49 2019 +0800
+
+    [Core-X4][recovery]Modify for recovery auto update zippkg select
+    
+    Change-Id: If5633a15ecc64965d7834437de533a2620123683
+
+diff --git a/LA.UM.7.6.2/LINUX/android/bootable/recovery/recovery.cpp b/LA.UM.7.6.2/LINUX/android/bootable/recovery/recovery.cpp
+index 55507be..187f7e0 100755
+--- a/LA.UM.7.6.2/LINUX/android/bootable/recovery/recovery.cpp
++++ b/LA.UM.7.6.2/LINUX/android/bootable/recovery/recovery.cpp
+@@ -120,7 +120,7 @@ static const char *TEMPORARY_LOG_FILE = "/tmp/recovery.log";
+ static const char *TEMPORARY_INSTALL_FILE = "/tmp/last_install";
+ static const char *LAST_KMSG_FILE = "/cache/recovery/last_kmsg";
+ static const char *LAST_LOG_FILE = "/cache/recovery/last_log";
+-static const char *FULL_UPDATE_PKG = "/sdcard/update.zip";
++//static const char *FULL_UPDATE_PKG = "/sdcard/update.zip";
+ // We will try to apply the update package 5 times at most in case of an I/O error or
+ // bspatch | imgpatch error.
+ static const int RETRY_LIMIT = 4;
+@@ -132,6 +132,8 @@ static const int BATTERY_OK_PERCENTAGE = 20;
+ static const int BATTERY_WITH_CHARGER_OK_PERCENTAGE = 15;
+ static constexpr const char* RECOVERY_WIPE = "/etc/recovery.wipe";
+ static constexpr const char* DEFAULT_LOCALE = "en-US";
++/*dongxc add pkg_path as recovery auto update zip pkg path*/
++static std::string pkg_path = "/sdcard/";
+ 
+ // We define RECOVERY_API_VERSION in Android.mk, which will be picked up by build system and packed
+ // into target_files.zip. Assert the version defined in code and in Android.mk are consistent.
+@@ -1083,10 +1085,12 @@ error:
+     return -1;
+ }
+ 
++/*dongxc add for recovery auto update func
++**search the first zip pkg and return true*/
+ static bool check_updatepkg_from_sdcard()
+ {
+-    int stat_err = 0;
+-    struct stat fileAtt;
++  struct dirent* de = NULL;
++  DIR *pDir = NULL;
+ 
+     if (is_ufs_dev()) {
+             if (do_sdcard_mount_for_ufs() != 0) {
+@@ -1102,9 +1106,25 @@ static bool check_updatepkg_from_sdcard()
+             ui->Print("ensure_path_mounted ..\n");
+     }
+ 
+-    stat_err = stat(FULL_UPDATE_PKG, &fileAtt);
+-
+-    return stat_err;
++    pDir = opendir(SDCARD_ROOT);
++    while ((de = readdir(pDir)) != nullptr) {
++      std::string name(de->d_name);
++      //ui->Print("Get name : %s\n",de->d_name);
++      if (de->d_type == DT_DIR) {
++        // Skip "." and ".." entries.
++        if (name == "." || name == "..") continue;
++      } else if (de->d_type == DT_REG && android::base::EndsWithIgnoreCase(name, ".zip")) {
++          //ui->Print("Get ZIP name : %s\n",de->d_name);
++          pkg_path += de->d_name;
++          ui->Print("Get ZIP path : %s\n",pkg_path.c_str());
++          /*install_pacake will remount sdcard,must closedir*/
++          closedir(pDir);
++          return true;
++      }
++    }
++    ui->Print("Get ZIP NULL !!\n");
++    closedir(pDir);
++    return false;
+ }
+ // How long (in seconds) we wait for the fuse-provided package file to
+ // appear, before timing out.
+@@ -1693,9 +1713,8 @@ int main(int argc, char **argv) {
+ 
+   ui->Print("Supported API: %d\n", kRecoveryApiVersion);
+   /*add for sdcard auto update*/
+-  if(!check_updatepkg_from_sdcard()){
+-      //ui->Print("check_updatepkg_from_sdcard 0 \n");
+-        err_in = install_package(FULL_UPDATE_PKG, &should_wipe_cache,
++  if(check_updatepkg_from_sdcard()){
++        err_in = install_package(pkg_path, &should_wipe_cache,
+                                  TEMPORARY_INSTALL_FILE, true, 0/*retry_count*/);
+        ui->Print("install_package %d \n",err_in);
+        if (!err_in){
+@@ -1704,7 +1723,7 @@ int main(int argc, char **argv) {
+        }
+       //apply_from_sdcard(device, &should_wipe_cache)
+   }else{
+-      ui->Print("check_updatepkg_from_sdcard error \n");
++      ui->Print("check_updatepkg_from_sdcard Failed \n");
+   }
+ 
+   if (update_package != nullptr) {
